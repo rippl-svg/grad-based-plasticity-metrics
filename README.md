@@ -35,8 +35,85 @@ plasticity_metrics/
   - TensorBoard support
   - Configurable hyperparameters
   - Multi-seed experiment support
-## Code Logic for Key Components for ReDo-style reset & plasticity metrics (Introduce of the most important coding part, @johan, maybe a simplify way is just transfer the related code module to your DQN/DT project)
-### 
+## Main Training Loop Logic
+
+The main training loop in `main.py` demonstrates how the plasticity metrics and reset mechanisms are integrated into the SAC training process. Here's a detailed breakdown:
+
+### Initialization Phase
+```python
+# Initialize gradient analyzer for Q-function
+q_analyzer = GradientAnalyzer(qf1)
+
+# Initialize ReDo or Gradient ReDo based on experiment type
+if args.exp_name == "redo":
+    q1_redo = ReDo(qf1, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
+    q2_redo = ReDo(qf2, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
+
+if args.exp_name == "grad_redo":
+    q1_grad_redo = GradientReDo(qf1, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
+    q2_grad_redo = GradientReDo(qf2, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
+```
+
+### Training Loop Integration
+
+1. **Gradient Analysis (Every N Steps)**
+   ```python
+   if global_step % args.grad_analyze_freq == 0:
+       # Analyze gradients for plasticity metrics
+       nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
+       # Log metrics to W&B
+       if args.track:
+           wandb.log({"nullspace_ratio": nullspace_ratio, "zero_grad_ratio": zero_grad_ratio})
+   ```
+
+2. **ReDo Reset (Based on Frequency)**
+   ```python
+   if args.exp_name == "redo":
+       # Activation-based reset
+       q1_redo.step()
+       q2_redo.step()
+   elif args.exp_name == "grad_redo":
+       # Gradient-based reset
+       q1_grad_redo.step()
+       q2_grad_redo.step()
+   ```
+
+3. **Training Step Integration**
+   ```python
+   # Regular SAC training step
+   qf1_loss, qf2_loss = train_critic(...)
+   
+   # After critic update, check for plasticity loss
+   if args.exp_name == "grad_redo":
+       # Additional gradient analysis after training
+       nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
+   ```
+
+### Key Points:
+
+1. **GradientAnalyzer**:
+   - Initialized once at the start
+   - Called periodically to monitor network plasticity
+   - Provides nullspace ratio and zero gradient ratio metrics
+
+2. **ReDo**:
+   - Called based on frequency parameter
+   - Resets neurons based on activation patterns
+   - Applied to both Q-functions independently
+
+3. **GradientReDo**:
+   - Similar frequency-based calling pattern
+   - Uses gradient information for reset decisions
+   - Also applied to both Q-functions
+
+4. **Integration Timing**:
+   - Analysis happens every `grad_analyze_freq` steps
+   - Resets occur based on `redo_frequency` or `grad_redo_frequency`
+   - Metrics are logged to W&B when tracking is enabled
+
+This integration ensures continuous monitoring of network plasticity while maintaining the core SAC training process.
+
+## Code Logic for 2 Key Components files (Introduce of the most important coding part will be used for other porject)
 ### To integrate all the Rest schedule functionality into other projects (e.g., DQN/DT), focus on these core components from `ReDo.py`:
 
 #### 1. Base Reset Functionality (`BaseReDo` class)
@@ -162,99 +239,6 @@ Key parameters that can be modified:
   - `--track`: Enable W&B logging
   - `--wandb-project-name`: W&B project name
   - `--capture-video`: Record environment videos
-
-## Monitoring and Visualization
-
-### Weights & Biases
-Enable W&B logging with the `--track` flag. Monitored metrics include:
-- Episode returns and lengths
-- Q-values and losses
-- Plasticity metrics (dormant neuron ratio, gradient based ratio, zero_grad ratio)
-- Network gradients statistics  
-
-### TensorBoard
-Training progress can be monitored using TensorBoard:
-```bash
-tensorboard --logdir runs
-```
-
-## Main Training Loop Logic
-
-The main training loop in `main.py` demonstrates how the plasticity metrics and reset mechanisms are integrated into the SAC training process. Here's a detailed breakdown:
-
-### Initialization Phase
-```python
-# Initialize gradient analyzer for Q-function
-q_analyzer = GradientAnalyzer(qf1)
-
-# Initialize ReDo or Gradient ReDo based on experiment type
-if args.exp_name == "redo":
-    q1_redo = ReDo(qf1, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
-    q2_redo = ReDo(qf2, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
-
-if args.exp_name == "grad_redo":
-    q1_grad_redo = GradientReDo(qf1, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
-    q2_grad_redo = GradientReDo(qf2, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
-```
-
-### Training Loop Integration
-
-1. **Gradient Analysis (Every N Steps)**
-   ```python
-   if global_step % args.grad_analyze_freq == 0:
-       # Analyze gradients for plasticity metrics
-       nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
-       # Log metrics to W&B
-       if args.track:
-           wandb.log({"nullspace_ratio": nullspace_ratio, "zero_grad_ratio": zero_grad_ratio})
-   ```
-
-2. **ReDo Reset (Based on Frequency)**
-   ```python
-   if args.exp_name == "redo":
-       # Activation-based reset
-       q1_redo.step()
-       q2_redo.step()
-   elif args.exp_name == "grad_redo":
-       # Gradient-based reset
-       q1_grad_redo.step()
-       q2_grad_redo.step()
-   ```
-
-3. **Training Step Integration**
-   ```python
-   # Regular SAC training step
-   qf1_loss, qf2_loss = train_critic(...)
-   
-   # After critic update, check for plasticity loss
-   if args.exp_name == "grad_redo":
-       # Additional gradient analysis after training
-       nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
-   ```
-
-### Key Points:
-
-1. **GradientAnalyzer**:
-   - Initialized once at the start
-   - Called periodically to monitor network plasticity
-   - Provides nullspace ratio and zero gradient ratio metrics
-
-2. **ReDo**:
-   - Called based on frequency parameter
-   - Resets neurons based on activation patterns
-   - Applied to both Q-functions independently
-
-3. **GradientReDo**:
-   - Similar frequency-based calling pattern
-   - Uses gradient information for reset decisions
-   - Also applied to both Q-functions
-
-4. **Integration Timing**:
-   - Analysis happens every `grad_analyze_freq` steps
-   - Resets occur based on `redo_frequency` or `grad_redo_frequency`
-   - Metrics are logged to W&B when tracking is enabled
-
-This integration ensures continuous monitoring of network plasticity while maintaining the core SAC training process.
 
 ## License
 
