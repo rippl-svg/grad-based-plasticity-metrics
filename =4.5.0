@@ -1,0 +1,10 @@
+Requirement already satisfied: typing-extensions in /home/jiashunliu/anaconda3/envs/null_rl/lib/python3.9/site-packages (4.5.0)
+Collecting typing-extensions
+  Using cached typing_extensions-4.12.2-py3-none-any.whl.metadata (3.0 kB)
+Using cached typing_extensions-4.12.2-py3-none-any.whl (37 kB)
+Installing collected packages: typing-extensions
+  Attempting uninstall: typing-extensions
+    Found existing installation: typing_extensions 4.5.0
+    Uninstalling typing_extensions-4.5.0:
+      Successfully uninstalled typing_extensions-4.5.0
+Successfully installed typing-extensions-4.12.2
