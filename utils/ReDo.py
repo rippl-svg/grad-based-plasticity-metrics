@@ -472,9 +472,6 @@ class GradientReDo(BaseReDo):
             dormant_fraction = (dormant_count / max(1, total_neurons)) * 100
             
             print(f"Gradient reset complete")
-            print(f"Total neurons: {total_neurons} | "
-                  f"Dormant neurons: {dormant_count} | "
-                  f"Dormant fraction: {dormant_fraction:.2f}%")
             
             return {
                 "dormant_fraction": dormant_fraction,
