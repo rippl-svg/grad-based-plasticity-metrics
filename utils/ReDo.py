@@ -75,7 +75,7 @@ class BaseReDo:
                     ).uniform_(-bound, bound)
 
     @staticmethod
-    def _lecun_normal_reinit(layer: Union[nn.Linear, nn.Conv2d], mask: torch.Tensor) -> None:
+    def _lecun_normal_reinit(layer: Union[nn.Linear, nn.Conv2d, nn.LayerNorm], mask: torch.Tensor) -> None:
         """
         Reinitializes selected neurons using LeCun normal initialization.
         
@@ -83,18 +83,23 @@ class BaseReDo:
             layer (Union[nn.Linear, nn.Conv2d]): Layer containing neurons to reinitialize
             mask (torch.Tensor): Boolean mask indicating which neurons to reinitialize
         """
+        if isinstance(layer, nn.LayerNorm):
+            layer.weight.data[mask] = torch.ones_like(layer.weight.data[mask])
+            layer.bias.data[mask] = torch.zeros_like(layer.bias.data[mask])
+            return
+
         fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
         variance = 1.0 / fan_in
         stddev = math.sqrt(variance) / 0.87962566103423978
         
-        # Reset weights for masked neurons
+        # Reset weights
         with torch.no_grad():
             layer.weight[mask] = nn.init._no_grad_trunc_normal_(
                 layer.weight[mask], mean=0.0, std=1.0, a=-2.0, b=2.0
             )
             layer.weight[mask] *= stddev
             
-            # Reset bias if present
+            # Reset bias if it exists
             if layer.bias is not None:
                 layer.bias.data[mask] = 0.0
 
@@ -185,23 +190,6 @@ class BaseReDo:
                 else:
                     self._kaiming_uniform_reinit(layer, mask)
 
-
-                # Reset outgoing weights to 0
-                if isinstance(layer, nn.Conv2d) and isinstance(next_layer, nn.Linear):
-                    # Handle conv to linear transition
-                    num_repeat = next_layer.weight.data.shape[1] // mask.shape[0]
-                    linear_mask = torch.repeat_interleave(mask, num_repeat)
-                    next_layer.weight.data[:, linear_mask] = 0.0
-                    # Reset gradients for outgoing weights
-                    if next_layer.weight.grad is not None:
-                        next_layer.weight.grad[:, linear_mask] = 0.0
-                else:
-                    # Standard case: both conv or both linear
-                    next_layer.weight.data[:, mask, ...] = 0.0
-                    # Reset gradients for outgoing weights
-                    if next_layer.weight.grad is not None:
-                        next_layer.weight.grad[:, mask, ...] = 0.0
-
         return model
 
     def _get_redo_masks(self, *args, **kwargs) -> List[torch.Tensor]:
@@ -216,191 +204,282 @@ class BaseReDo:
 class ReDo(BaseReDo):
     """Activation-based ReDo implementation (baseline method)."""
     
-    def _get_activation(self, name: str, activations: Dict[str, torch.Tensor]) -> Callable:
-        def hook(layer: Union[nn.Linear, nn.Conv2d], 
+    def _get_activation_and_reset(self, layer_name: str, layer: Union[nn.Linear, nn.Conv2d, nn.LayerNorm]) -> Callable:
+        """Get activation values and immediately reset the current layer's hook function"""
+        def hook(layer: Union[nn.Linear, nn.Conv2d, nn.LayerNorm], 
                 input: Tuple[torch.Tensor], 
                 output: torch.Tensor) -> None:
-            activations[name] = F.relu(output)
+            # Get activation values
+            activation = F.relu(output)
+            
+            # Compute score for current layer
+            if isinstance(layer, nn.Conv2d):  # Conv layer
+                score = activation.abs().mean(dim=(0, 2, 3))
+            elif isinstance(layer, nn.Linear):  # Linear layer
+                score = activation.abs().mean(dim=0)
+            elif isinstance(layer, nn.LayerNorm):
+                score = activation.abs().mean(dim=0)
+            else:
+                raise ValueError(f"Unsupported layer type: {type(layer)}")
+            
+            # Compute mask according to different modes
+            if self.mode == 'threshold':
+                # Normalize score
+                normalized_score = score / (score.mean() + 1e-9)
+                # Create mask (True for dormant neurons)
+                layer_mask = torch.zeros_like(normalized_score, dtype=torch.bool)
+                if self.tau > 0.0:
+                    layer_mask[normalized_score <= self.tau] = 1
+                else:
+                    layer_mask[torch.isclose(normalized_score, torch.zeros_like(normalized_score))] = 1
+            
+            elif self.mode == 'percentage':
+                # Select least active neurons by percentage
+                k = max(1, int(len(score) * self.percentage))
+                threshold = torch.kthvalue(score, k).values if k < len(score) else torch.min(score)
+                layer_mask = score <= threshold
+            
+            elif self.mode == 'hybrid':
+                # First filter by threshold, then limit max reset ratio
+                normalized_score = score / (score.mean() + 1e-9)
+                threshold_mask = normalized_score <= self.tau
+                
+                k_max = max(1, int(len(score) * self.max_percentage))
+                if threshold_mask.sum() > k_max:
+                    combined_score = score.clone()
+                    combined_score[~threshold_mask] = float('inf')
+                    _, indices = torch.topk(combined_score, k_max, largest=False)
+                    layer_mask = torch.zeros_like(score, dtype=torch.bool)
+                    layer_mask[indices] = True
+                else:
+                    layer_mask = threshold_mask
+            
+            # Statistics
+            self.layer_neurons += layer_mask.numel()
+            self.layer_dormant += layer_mask.sum().item()
+            
+            # Immediately reset current layer
+            if torch.any(layer_mask) and self.should_reset:
+                # Reset weights using specified initialization
+                if self.use_lecun_init:
+                    self._lecun_normal_reinit(layer, layer_mask)
+                else:
+                    self._kaiming_uniform_reinit(layer, layer_mask)
+                
+                # Reset optimizer state (if any)
+                if self.optimizer is not None:
+                    # Find this layer's param in optimizer
+                    for param_group in self.optimizer.param_groups:
+                        for param in param_group['params']:
+                            if param is layer.weight:
+                                state = self.optimizer.state[param]
+                                if 'exp_avg' in state:
+                                    state['exp_avg'][layer_mask] = 0.0
+                                    state['exp_avg_sq'][layer_mask] = 0.0
+                            elif param is layer.bias and layer.bias is not None:
+                                state = self.optimizer.state[param]
+                                if 'exp_avg' in state:
+                                    state['exp_avg'][layer_mask] = 0.0
+                                    state['exp_avg_sq'][layer_mask] = 0.0
+                
         return hook
 
-    def _get_redo_masks(self, activations: Dict[str, torch.Tensor], tau: float) -> List[torch.Tensor]:
-        """Computes masks based on activation values."""
-        masks = []
-        
-        # Last activation (q-values) are never reset
-        for name, activation in list(activations.items())[:-1]:
-            if activation.ndim == 4:  # Conv layer
-                score = activation.abs().mean(dim=(0, 2, 3))
-            else:  # Linear layer
-                score = activation.abs().mean(dim=0)
-                
-            # Normalize scores by mean activation
-            normalized_score = score / (score.mean() + 1e-9)
-            
-            # Create mask (True for dormant neurons)
-            layer_mask = torch.zeros_like(normalized_score, dtype=torch.bool)
-            if tau > 0.0:
-                layer_mask[normalized_score <= tau] = 1
-            else:
-                layer_mask[torch.isclose(normalized_score, torch.zeros_like(normalized_score))] = 1
-            masks.append(layer_mask)
-            
-        return masks
-
-    @torch.no_grad()
+    @torch.inference_mode()
     def step(self, obs: torch.Tensor) -> Dict[str, any]:
-        """Performs ReDo step using activation values."""
+        """Perform layerwise ReDo step"""
         self.current_step += 1
-        if self.current_step % self.frequency == 0 and (self.reset_steps is None or self.current_step < self.reset_steps):
+        
+        # Check if in reset range
+        in_reset_range = True
+        if self.reset_steps is not None:
+            in_reset_range = self.current_step >= self.reset_steps[0] and self.current_step <= self.reset_steps[1]
             
-            activations = {}
+        self.should_reset = self.current_step % self.frequency == 0 and in_reset_range
+        
+        if self.should_reset:
+            # Initialize statistics
+            self.layer_neurons = 0
+            self.layer_dormant = 0
             
             # Register hooks
             handles = []
             for name, module in self.model.named_modules():
-                if isinstance(module, (nn.Conv2d, nn.Linear)):
+                if isinstance(module, (nn.Conv2d, nn.Linear, nn.LayerNorm)):
                     handles.append(
                         module.register_forward_hook(
-                            self._get_activation(name, activations)
+                            self._get_activation_and_reset(name, module)
                         )
                     )
 
-            # Get activations
+            # Get activations and reset (hook function will handle)
             if isinstance(obs, tuple):
                 _ = self.model(*obs)
             else:
                 _ = self.model(obs)
 
-            # Get masks for logging (tau=0) and resetting
-            zero_masks = self._get_redo_masks(activations, 0.0)
-            total_neurons = sum(torch.numel(mask) for mask in zero_masks)
-            zero_count = sum(torch.sum(mask) for mask in zero_masks)
-            zero_fraction = (zero_count / total_neurons) * 100
-
-            masks = self._get_redo_masks(activations, self.tau)
-            dormant_count = sum(torch.sum(mask) for mask in masks)
-            dormant_fraction = (dormant_count / total_neurons) * 100
-
-            # Reset dormant neurons if requested
+            # Compute statistics
+            dormant_fraction = (self.layer_dormant / max(1, self.layer_neurons)) * 100
+            
             print(f"Re-initializing dormant neurons")
-            print(f"Total neurons: {total_neurons} | "
-                    f"Dormant neurons: {dormant_count} | "
-                    f"Dormant fraction: {dormant_fraction:.2f}%")
-            self.model = self._reset_dormant_neurons(self.model, masks)
-            if self.optimizer is not None:
-                self._reset_adam_moments(masks)
+            print(f"Total neurons: {self.layer_neurons} | "
+                  f"Dormant neurons: {self.layer_dormant} | "
+                  f"Dormant fraction: {dormant_fraction:.2f}%")
 
-            # Clean up hooks
+            # Remove hooks
             for handle in handles:
                 handle.remove()
 
             return {
-                "zero_fraction": zero_fraction,
-                "zero_count": zero_count,
                 "dormant_fraction": dormant_fraction,
-                "dormant_count": dormant_count,
+                "dormant_count": self.layer_dormant,
+                "total_neurons": self.layer_neurons
             }
         else:
-            return{}
+            return {}
 
 
 class GradientReDo(BaseReDo):
     """Gradient-based ReDo implementation with cosine annealing (our method)."""
-
-
-    def _reset_dormant_neurons(self, model: nn.Module, redo_masks: List[torch.Tensor]) -> nn.Module:
-        """Re-initializes the weights of dormant neurons."""
-        # Only get Conv2d and Linear layers
-        layers = [(name, layer) for name, layer in model.named_modules() 
-                 if isinstance(layer, (nn.Conv2d, nn.Linear))]
-    
+    def __init__(self, model: nn.Module, mode: str = 'threshold', tau: float = 0, 
+                     percentage: float = 1, max_percentage: float = 1,
+                     use_lecun_init: bool = False, frequency: int = 1000, 
+                     optimizer: optim.Adam = None, reset_steps: List[int] = None):
+        super().__init__(model, tau, use_lecun_init, frequency, optimizer, reset_steps)
+        self.mode = mode
+        self.percentage = percentage / 100 if 0 <= percentage <= 100 else 0.01
+        self.max_percentage = max_percentage / 100 if 0 <= max_percentage <= 100 else 0.01
         
-        assert len(redo_masks) == len(layers), (
-            f"Number of masks ({len(redo_masks)}) must match number of layers ({len(layers)})"
-        )
+    def _get_layer_mask(self, layer: nn.Module, tau: float) -> torch.Tensor:
+        """Compute mask for dormant neurons in a single layer"""
+        if layer.weight.grad is None:
+            # Handle no gradient case
+            if isinstance(layer, nn.Conv2d):
+                return torch.zeros(layer.out_channels, dtype=torch.bool, device=layer.weight.device)
+            elif isinstance(layer, nn.Linear):
+                return torch.zeros(layer.out_features, dtype=torch.bool, device=layer.weight.device)
+                
+        # Compute mean absolute value of gradients
+        if isinstance(layer, nn.Conv2d):
+            grad_magnitude = layer.weight.grad.abs().mean(dim=(1, 2, 3))
+        elif isinstance(layer, nn.Linear):
+            grad_magnitude = layer.weight.grad.abs().mean(dim=1)
+        elif isinstance(layer, nn.LayerNorm):
+            grad_magnitude = layer.weight.grad.abs()
+        else:
+            raise ValueError(f"Unsupported layer type: {type(layer)}")
 
-        # Reset ingoing weights
-        with torch.no_grad():
-            for i in range(len(layers)):
-                mask = redo_masks[i]
-                layer = layers[i][1]
-
-                # Skip if no dead neurons
-                if torch.all(~mask):
-                    continue
-
-                # Reset weights using specified initialization
-                if self.use_lecun_init:
-                    self._lecun_normal_reinit(layer, mask)
-                else:
-                    self._kaiming_uniform_reinit(layer, mask)
-
-
-                if layer.weight.grad is not None:
-                    layer.weight.grad[mask] = 0.0
-                if layer.bias is not None and layer.bias.grad is not None:
-                    layer.bias.grad[mask] = 0.0
-
-        return model
-
-
-
-    def _get_redo_masks(self, tau: float) -> List[torch.Tensor]:
-        masks = []
-        layers = [(name, layer) for name, layer in self.model.named_modules() 
-                 if isinstance(layer, (nn.Conv2d, nn.Linear))]
-        
-        for name, layer in layers:
-            if layer.weight.grad is None:
-                # If there is no gradient, create a full False mask
-                if isinstance(layer, nn.Conv2d):
-                    mask = torch.zeros(layer.out_channels, dtype=torch.bool, device=layer.weight.device)
-                else:  # Linear
-                    mask = torch.zeros(layer.out_features, dtype=torch.bool, device=layer.weight.device)
+        # Handle logic for different modes
+        if self.mode == 'threshold':
+            normalized_grad = grad_magnitude / (grad_magnitude.mean() + 1e-9)
+            mask = normalized_grad <= tau
+        elif self.mode == 'percentage':
+            k = max(1, int(len(grad_magnitude) * self.percentage))
+            threshold = torch.kthvalue(grad_magnitude, k).values if k < len(grad_magnitude) else torch.min(grad_magnitude)
+            mask = grad_magnitude <= threshold
+        elif self.mode == 'hybrid':
+            normalized_grad = grad_magnitude / (grad_magnitude.mean() + 1e-9)
+            threshold_mask = normalized_grad <= tau
+            
+            k_max = max(1, int(len(grad_magnitude) * self.max_percentage))
+            if threshold_mask.sum() > k_max:
+                combined_grad = grad_magnitude.clone()
+                combined_grad[~threshold_mask] = float('inf')
+                _, indices = torch.topk(combined_grad, k_max, largest=False)
+                mask = torch.zeros_like(grad_magnitude, dtype=torch.bool)
+                mask[indices] = True
             else:
-                # Calculate the average absolute gradient magnitude for each output channel/neuron
-                if isinstance(layer, nn.Conv2d):
-                    grad_magnitude = layer.weight.grad.abs().mean(dim=(1, 2, 3))
-                else:  # Linear
-                    grad_magnitude = layer.weight.grad.abs().mean(dim=1)
+                mask = threshold_mask
                 
-                # Normalize the gradient magnitude
-                normalized_grad = grad_magnitude / (grad_magnitude.mean() + 1e-9)
+        return mask
+    
+    def _reset_single_layer(self, layer: nn.Module, mask: torch.Tensor) -> None:
+        """Reset dormant neurons in a single layer"""
+        if torch.all(~mask):
+            return
+            
+        with torch.no_grad():
+            # Reset weights using specified method
+            if self.use_lecun_init:
+                self._lecun_normal_reinit(layer, mask)
+            else:
+                self._kaiming_uniform_reinit(layer, mask)
                 
-                # Create mask (True for neurons with gradient close to 0)
-                mask = torch.zeros_like(normalized_grad, dtype=torch.bool)
-
-
-                mask[normalized_grad <= tau] = 1
+            # Reset gradients
+            if layer.weight.grad is not None:
+                layer.weight.grad[mask] = 0.0
+            if layer.bias is not None and layer.bias.grad is not None:
+                layer.bias.grad[mask] = 0.0
+                
+        # If optimizer exists, reset corresponding optimizer state for params
+        if self.optimizer is not None:
+            self._reset_layer_optimizer_state(layer, mask)
+    
+    def _reset_layer_optimizer_state(self, layer: nn.Module, mask: torch.Tensor) -> None:
+        """Reset optimizer state for a single layer"""
+        if not isinstance(self.optimizer, optim.Adam):
+            return
             
-            masks.append(mask)
-            
-        return masks
-
+        # Find corresponding param in optimizer state
+        for param_group in self.optimizer.param_groups:
+            for param in param_group['params']:
+                if param is layer.weight:
+                    state = self.optimizer.state[param]
+                    if 'exp_avg' in state:
+                        state['exp_avg'][mask] = 0.0
+                        state['exp_avg_sq'][mask] = 0.0
+                elif param is layer.bias and layer.bias is not None:
+                    state = self.optimizer.state[param]
+                    if 'exp_avg' in state:
+                        state['exp_avg'][mask] = 0.0
+                        state['exp_avg_sq'][mask] = 0.0
+    
     @torch.no_grad()
     def step(self) -> Dict[str, any]:
-        """Performs ReDo step using gradient values."""
+        """Perform layerwise gradient ReDo step"""
         self.current_step += 1
-        if self.current_step % self.frequency == 0 and (self.reset_steps is None or self.current_step < self.reset_steps):
+        
+        # Check if in reset range
+        in_reset_range = True
+        if self.reset_steps is not None:
+            in_reset_range = self.current_step >= self.reset_steps[0] and self.current_step <= self.reset_steps[1]
             
-
-            masks = self._get_redo_masks(self.tau)
-            dormant_count = sum(torch.sum(mask) for mask in masks)
-            total_neurons = sum(torch.numel(mask) for mask in masks)
-            dormant_fraction = (dormant_count / total_neurons) * 100
-
-            print(f"Re-initializing dormant neurons based on gradients")
+        if self.current_step % self.frequency == 0 and in_reset_range:
+            # Initialize statistics
+            total_neurons = 0
+            dormant_count = 0
+            
+            # Get all resettable layers
+            layers = [(name, layer) for name, layer in self.model.named_modules() 
+                     if isinstance(layer, (nn.Linear, nn.Conv2d, nn.LayerNorm))]
+            
+            # Process layer by layer
+            for name, layer in layers:
+                    
+                # Compute mask for current layer
+                mask = self._get_layer_mask(layer, self.tau)
+                
+                # Statistics
+                layer_neurons = mask.numel()
+                layer_dormant = mask.sum().item()
+                total_neurons += layer_neurons
+                dormant_count += layer_dormant
+                
+                # Reset current layer
+                if layer_dormant > 0:
+                    self._reset_single_layer(layer, mask)
+            
+            # Compute overall statistics
+            dormant_fraction = (dormant_count / max(1, total_neurons)) * 100
+            
+            print(f"Gradient reset complete")
             print(f"Total neurons: {total_neurons} | "
                   f"Dormant neurons: {dormant_count} | "
                   f"Dormant fraction: {dormant_fraction:.2f}%")
             
-            self.model = self._reset_dormant_neurons(self.model, masks)
-            if self.optimizer is not None:
-                self._reset_adam_moments(masks)
-
             return {
                 "dormant_fraction": dormant_fraction,
                 "dormant_count": dormant_count,
+                "total_neurons": total_neurons,
             }
         else:
             return {}
