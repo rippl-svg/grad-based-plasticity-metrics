@@ -113,7 +113,7 @@ if args.exp_name == "grad_redo":
 
 This integration ensures continuous monitoring of network plasticity while maintaining the core SAC training process.
 
-## Code Logic for 2 Key Components files (Introduce of the most important coding part will be used for other porject)
+## Code Logic for 2 Key Components files
 ### To integrate all the Rest schedule functionality into other projects (e.g., DQN/DT), focus on these core components from `ReDo.py`:
 
 #### 1. Base Reset Functionality (`BaseReDo` class)
@@ -141,7 +141,7 @@ Key methods to adapt:
 
 The core reset functionality is model-agnostic and can be adapted to any neural network architecture with minimal changes.
 
-### Understanding the implementation of our grad-based plasticity metrics (in code it is called nullspace ratio) with `Gradanalyzer.py`:
+### Understanding the implementation of our other theoretical grad-based plasticity metrics with `Gradanalyzer.py`:
 
 The `GradientAnalyzer` class provides tools to measure neural network plasticity through gradient analysis. Key components:
 
