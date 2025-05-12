@@ -1,6 +1,6 @@
 # Neural Network Plasticity Metrics with SAC
 
-This repository implements various neural network plasticity metrics in the context of Soft Actor-Critic (SAC) reinforcement learning algorithm. It features novel approaches to maintain network plasticity during training, including ReDo (Reset of Dormant units) and Gradient-based ReDo implementations.
+This repository implements various neural network plasticity metrics in the context of Soft Actor-Critic (SAC) reinforcement learning algorithm. It features novel approaches to maintain network plasticity during training, including ReDo (Reset of Dormant units) and Grama implementations.
 ## Project Structure
 
 ```
@@ -44,11 +44,11 @@ The main training loop in `main.py` demonstrates how the plasticity metrics and 
 # Initialize gradient analyzer for Q-function
 q_analyzer = GradientAnalyzer(qf1)
 
-# Initialize ReDo or Gradient ReDo based on experiment type
+# Initialize ReDo based on experiment type
 if args.exp_name == "redo":
     q1_redo = ReDo(qf1, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
     q2_redo = ReDo(qf2, tau=args.redo_tau, frequency=args.redo_frequency, use_lecun_init=args.redo_use_lecun_init)
-
+#Initialize Grama based on experiment type
 if args.exp_name == "grad_redo":
     q1_grad_redo = GradientReDo(qf1, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
     q2_grad_redo = GradientReDo(qf2, tau=args.grad_redo_tau, frequency=args.grad_redo_frequency, use_lecun_init=args.grad_use_lecun_init)
