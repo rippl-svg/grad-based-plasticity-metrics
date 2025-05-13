@@ -1,6 +1,6 @@
-# Neural Network Plasticity Metrics with SAC
+# Neuronal Activity Metrics with SAC
 
-This repository implements various neural network plasticity metrics in the context of Soft Actor-Critic (SAC) reinforcement learning algorithm. It features novel approaches to maintain network plasticity during training, including ReDo (Reset of Dormant units) and Grama implementations.
+This repository implements various neuronal activity metrics in the context of Soft Actor-Critic (SAC) reinforcement learning algorithm. It features novel approaches to maintain network plasticity during training, including ReDo (Reset of Dormant units) and Grama implementations.
 ## Project Structure
 
 ```
@@ -24,7 +24,7 @@ plasticity_metrics/
   - Automatic entropy tuning
   - Continuous action space support
 
-- **Plasticity Metrics**
+- **Metrics**
   - ReDo: Activation-based neuron reset
   - Gradient ReDo: Gradient-based neuron reset
   - Adaptive L2 regularization with nullspace analysis
@@ -37,7 +37,7 @@ plasticity_metrics/
   - Multi-seed experiment support
 ## Main Training Loop Logic
 
-The main training loop in `main.py` demonstrates how the plasticity metrics and reset mechanisms are integrated into the SAC training process. Here's a detailed breakdown:
+The main training loop in `main.py` demonstrates how the metrics and reset mechanisms are integrated into the SAC training process. Here's a detailed breakdown:
 
 ### Initialization Phase
 ```python
@@ -59,7 +59,7 @@ if args.exp_name == "grad_redo":
 1. **Gradient Analysis (Every N Steps)**
    ```python
    if global_step % args.grad_analyze_freq == 0:
-       # Analyze gradients for plasticity metrics
+       # Analyze gradients for metrics
        nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
        # Log metrics to W&B
        if args.track:
@@ -83,7 +83,7 @@ if args.exp_name == "grad_redo":
    # Regular SAC training step
    qf1_loss, qf2_loss = train_critic(...)
    
-   # After critic update, check for plasticity loss
+   # After critic update, check for neuronal activity loss
    if args.exp_name == "grad_redo":
        # Additional gradient analysis after training
        nullspace_ratio, zero_grad_ratio = q_analyzer.analyze_gradients()
@@ -93,7 +93,7 @@ if args.exp_name == "grad_redo":
 
 1. **GradientAnalyzer**:
    - Initialized once at the start
-   - Called periodically to monitor network plasticity
+   - Called periodically to monitor network neuronal activity
    - Provides nullspace ratio and zero gradient ratio metrics
 
 2. **ReDo**:
@@ -111,7 +111,7 @@ if args.exp_name == "grad_redo":
    - Resets occur based on `redo_frequency` or `grad_redo_frequency`
    - Metrics are logged to W&B when tracking is enabled
 
-This integration ensures continuous monitoring of network plasticity while maintaining the core SAC training process.
+This integration ensures continuous monitoring of network neuronal activity while maintaining the core SAC training process.
 
 ## Code Logic for 2 Key Components files
 ### To integrate all the Rest schedule functionality into other projects (e.g., DQN/DT), focus on these core components from `ReDo.py`:
@@ -137,13 +137,13 @@ Key methods to adapt:
 2. Choose either activation or gradient-based approach
 3. Adapt mask generation logic to your network architecture
 4. Integrate reset calls into your training loop
-5. Optional: combine optimizer state management with ReDo (This technique is used to mitigate plasticity loss isolately, which would interfere with real performance comparison of redo and gradient-based redo)
+5. Optional: combine optimizer state management with ReDo (This technique is used to mitigate neuronal activity loss isolately, which would interfere with real performance comparison of redo and gradient-based redo)
 
 The core reset functionality is model-agnostic and can be adapted to any neural network architecture with minimal changes.
 
-### Understanding the implementation of our other theoretical grad-based plasticity metrics with `Gradanalyzer.py`:
+### Understanding the implementation of our other theoretical grad-based neuronal activity metrics with `Gradanalyzer.py`:
 
-The `GradientAnalyzer` class provides tools to measure neural network plasticity through gradient analysis. Key components:
+The `GradientAnalyzer` class provides tools to measure neural network neuronal activity through gradient analysis. Key components:
 
 1. **Gradient Collection** (Implemented in `_register_grad_hooks()` and `_build_params_index()`)
    - Hooks are registered to collect gradients from all model parameters during initialization
@@ -168,13 +168,13 @@ The `GradientAnalyzer` class provides tools to measure neural network plasticity
         - Find singular values below threshold (tol * largest singular value, tol is also can be changed empirically)
         - Ratio = number of small values in S metrix / batch size
      6. Also computes zero vector ratio as supplementary metric
-   - Returns nullspace ratio (0-1) indicating plasticity loss
+   - Returns nullspace ratio (0-1) indicating neuronal activity loss
       - Higher ratio = More redundant/ineffective gradient directions
       - Lower ratio = Better gradient diversity and learning capacity
    
 3. **Layer Contribution Analysis (not used, TO de done in the future maybe)**
    - Maps gradient importance back to model layers
-   - Provides insights into which layers contribute most to plasticity loss
+   - Provides insights into which layers contribute most to neuronal activity loss
 
 This analysis helps identify when networks need intervention via ReDo resets.
 
@@ -215,7 +215,7 @@ This script will run experiments with:
 - Multiple seeds
 - Different activation functions
 - Various network architectures
-- All plasticity methods
+- All methods
 
 ### Configuration Options
 
@@ -230,7 +230,7 @@ Key parameters that can be modified:
   - `--batch-size`: Batch size for training (default: 256)
   - `--gamma`: Discount factor (default: 0.99)
 
-- Plasticity Parameters:
+- neuronal activity Parameters:
   - `--redo-tau`: Threshold for ReDo (default: 0)
   - `--grad-redo-tau`: Threshold for Gradient ReDo (default: 0)
   - `--redo-frequency`: Reset frequency (default: 1000)
