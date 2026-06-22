@@ -48,6 +48,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 # ALGO LOGIC: initialize agent here:
+# ALGO LOGIC: initialize agent here:
 class SoftQNetwork(nn.Module):
     """
     Implements the Q-network for Soft Actor-Critic algorithm with configurable architecture.
